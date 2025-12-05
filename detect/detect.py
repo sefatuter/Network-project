@@ -174,7 +174,7 @@ def main():
     context.mitm_logger = DetectionLogger.setup_logger()
     monitor_gateway()
 
-if _name_ == "_main_":
+if __name__ == "_main_":
     try:
         main()
     except KeyboardInterrupt:

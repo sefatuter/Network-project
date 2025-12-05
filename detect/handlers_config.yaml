@@ -1,0 +1,12 @@
+console:
+  class: logging.StreamHandler
+  formatter: standard
+  level: DEBUG
+  stream: ext://sys.stdout
+
+file:
+  class: logging.FileHandler
+  formatter: standard
+  level: INFO
+  filename: "events_{timestamp}.log"
+  mode: "w"

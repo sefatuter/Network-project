@@ -1,0 +1,23 @@
+version: 1
+formatters:
+  standard:
+    format: "%(asctime)s - %(levelname)s - %(message)s"
+  root:
+    format: "ROOT: %(asctime)s - %(levelname)s - %(message)s"
+
+handlers:  
+  root:
+    class: logging.StreamHandler
+    formatter: root
+    level: DEBUG
+    stream: ext://sys.stdout
+
+loggers:
+  mitm_defender:
+    level: DEBUG
+    handlers: []
+    propagate: false
+
+root:
+  level: DEBUG
+  handlers: [root]
