@@ -3,10 +3,10 @@
 This document outlines the steps to execute the ARP spoofing simulation, network sniffing, and the detection module.
 
 ### **Project Team**
-* Bulut Demir
-* Defne Uluhan
-* Pelinsu Kaleli
-* Sefa Bayram Tüter
+* Bulut Demir  -->  (detect.py)
+* Defne Uluhan  -->  (snff.py)
+* Pelinsu Kaleli  -->  (/server)
+* Sefa Bayram Tüter  -->  (spoof.py)
 
 
 <img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/0a44152e-4bf7-43c5-a0f6-41e08a02e1a3" />
@@ -103,4 +103,5 @@ pip3 install -r requirements.txt
 sudo python3 detect.py
 
 ```
+
 
