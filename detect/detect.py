@@ -27,30 +27,37 @@ attack_count = 0
 def get_gateway_ip():
     """
     Return the system's default gateway IP as a string.
-    Uses 'netstat' or 'ip route' to be language independent.
+    Supports Windows, Linux, and macOS.
     """
     system = platform.system()
     
     if system == "Windows":
-        # 'route print' is better than ipconfig because it uses standard 0.0.0.0 notation
-        # regardless of system language (English vs Turkish).
         cmd = ["route", "print", "0.0.0.0"]
         try:
             output = subprocess.check_output(cmd).decode(errors="ignore")
-            # Look for the line starting with 0.0.0.0
-            # Example: 0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.35     25
             for line in output.splitlines():
                 if line.strip().startswith("0.0.0.0"):
                     parts = line.split()
                     if len(parts) > 2:
-                        # The 3rd column is usually the Gateway in 'route print'
                         context.gateway_ip = parts[2]
                         return
-        except Exception as e:
-            context.mitm_logger.error(f"[-] Gateway IP tespiti hatasi: {e}")
-            
-    else:
-        # Linux / macOS
+        except Exception:
+            pass
+
+    elif system == "Darwin":  # macOS
+        try:
+            # macOS için 'route -n get default' komutu kullanılır
+            cmd = ["route", "-n", "get", "default"]
+            output = subprocess.check_output(cmd).decode()
+            # Çıktı örneği: "gateway: 192.168.1.1" satırını bul
+            match = re.search(r'gateway:\s+(\S+)', output)
+            if match:
+                context.gateway_ip = match.group(1)
+                return
+        except Exception:
+            pass
+
+    else:  # Linux
         try:
             cmd = ["ip", "route"]
             output = subprocess.check_output(cmd).decode()
@@ -61,9 +68,9 @@ def get_gateway_ip():
         except Exception:
             pass
             
-    context.gateway_ip = None 
+    context.gateway_ip = None
 
-def get_mac_from_arp(target_ip):
+def get_mac_from_arp():
     """
     Returns MAC address of a specific IP from the OS ARP table.
     Refactored to take IP as an argument explicitly.
@@ -80,7 +87,7 @@ def get_mac_from_arp(target_ip):
 
     for line in output.splitlines():
         # Check if the line contains our target IP
-        if target_ip in line:
+        if context.gateway_ip in line:
             mac_match = re.search(mac_regex, line)
             if mac_match:
                 # Normalize MAC to standard format (e.g. replace - with :)
@@ -90,9 +97,7 @@ def get_mac_from_arp(target_ip):
 
 def determine_severity(count):
     """Ardışık saldırı sayısına göre şiddet seviyesi belirler."""
-    if count <= 2:
-        return "low"
-    elif count <= 5:
+    if count > 2 and count <= 5:
         return "medium"
     elif count <= 10:
         return "high"
@@ -102,25 +107,34 @@ def determine_severity(count):
 def print_status():
     """Başlangıç durum bilgisini yazdırır."""
     global defense_enabled, defense_mode
-    
-    print("\n" + "="*60)
-    print("🛡️  ARP SPOOFING TESPİT VE SAVUNMA SİSTEMİ")
-    print("="*60)
-    print(f"  Gateway IP      : {context.gateway_ip}")
-    print(f"  Orijinal MAC    : {context.original_mac}")
-    print(f"  İzleme Aralığı  : {context.interval} saniye")
-    print(f"  Savunma Durumu  : {'✓ AKTİF' if defense_enabled else '✗ DEVRE DIŞI'}")
+    # Prefer using the configured logger; fall back to print() if missing.
+
+    lines = []
+    lines.append("\n" + "="*60)
+    lines.append("🛡️  ARP SPOOFING TESPİT VE SAVUNMA SİSTEMİ")
+    lines.append("="*60)
+    lines.append(f"  Gateway IP      : {context.gateway_ip}")
+    lines.append(f"  Orijinal MAC    : {context.original_mac}")
+    lines.append(f"  İzleme Aralığı  : {context.interval} saniye")
+    lines.append(f"  Savunma Durumu  : {'✓ AKTİF' if defense_enabled else '✗ DEVRE DIŞI'}")
     if defense_enabled:
-        print(f"  Savunma Modu    : {defense_mode.upper()}")
-    print("="*60)
+        lines.append(f"  Savunma Modu    : {defense_mode.upper()}")
+    lines.append("="*60)
     if defense_enabled:
-        print("  SAVUNMA MODLARI:")
-        print("    passive    - Sadece uyarı verir")
-        print("    active     - ARP tablosunu düzeltir")
-        print("    aggressive - Tam savunma (engelleme + ağ kapatma)")
-        print("="*60)
-    print("  Çıkmak için CTRL+C")
-    print("="*60 + "\n")
+        lines.append("  SAVUNMA MODLARI:")
+        lines.append("    passive    - Sadece uyarı verir")
+        lines.append("    active     - ARP tablosunu düzeltir")
+        lines.append("    aggressive - Tam savunma (engelleme + ağ kapatma)")
+        lines.append("="*60)
+    lines.append("  Çıkmak için CTRL+C")
+    lines.append("="*60 + "\n")
+
+    if context.mitm_logger:
+        for l in lines:
+            context.mitm_logger.info(l)
+    else:
+        for l in lines:
+            print(l)
 
 def monitor_gateway():
     """Sürekli olarak Gateway MAC adresini izler."""
@@ -135,14 +149,15 @@ def monitor_gateway():
     context.mitm_logger.info(f"[+] İzlenen Gateway IP: {context.gateway_ip}")
 
     # 2. İlk (Orijinal) MAC adresini öğren
-    initial_mac = get_mac_from_arp(context.gateway_ip)
+    initial_mac = get_mac_from_arp()
     
     # Eğer ilk başta bulamazsa bir kez ping atıp tekrar denesin
     if not initial_mac:
         context.mitm_logger.info("[*] Gateway ARP tablosunda yok, ping atılıyor...")
-        subprocess.call(["ping", "-n" if platform.system() == "Windows" else "-c", "1", context.gateway_ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        param = "-n" if platform.system().lower() == "windows" else "-c"
+        subprocess.call(["ping", param, "1", context.gateway_ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
-        initial_mac = get_mac_from_arp(context.gateway_ip)
+        initial_mac = get_mac_from_arp()
 
     if initial_mac:
         context.original_mac = initial_mac
@@ -183,7 +198,7 @@ def monitor_gateway():
             subprocess.call(["ping", param, "1", context.gateway_ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             # Tabloyu oku
-            current_mac = get_mac_from_arp(context.gateway_ip)
+            current_mac = get_mac_from_arp()
 
             if not current_mac:
                 # MAC okunamazsa (ping başarısız vs) atla
@@ -216,7 +231,7 @@ def monitor_gateway():
                     elif defense_mode == "active":
                         # Aktif mod: ARP tablosunu düzelt
                         context.mitm_logger.info("[DEFENSE] Aktif mod - ARP tablosu düzeltiliyor...")
-                        defender.restore_arp_table()
+                        defender.apply_static_arp()
                         
                     elif defense_mode == "aggressive":
                         # Agresif mod: Tam savunma
@@ -230,7 +245,7 @@ def monitor_gateway():
             # =====================================================================
             # SALDIRI SONA ERDİ
             # =====================================================================
-            elif current_mac == context.original_mac and last_mac != context.original_mac:
+            elif last_mac != context.original_mac:
                 context.mitm_logger.info("="*50)
                 context.mitm_logger.info("[+] ✓ ARP Spoofing sona erdi. MAC normale döndü.")
                 context.mitm_logger.info(f"[+] Toplam ardışık saldırı tespiti: {attack_count}")
@@ -326,5 +341,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n[!] CTRL+C tespit edildi. Çıkılıyor...")
-        cleanup()
         sys.exit(0)

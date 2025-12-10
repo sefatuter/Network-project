@@ -11,7 +11,7 @@ import logging
 
 
 def get_default_interface() -> str:
-    """Varsayılan ağ arayüzünü tespit eder (WiFi dahil)."""
+    """Varsayılan ağ arayüzünü tespit eder (Windows, Linux, macOS)."""
     system = platform.system().lower()
     
     if system == "windows":
@@ -33,34 +33,29 @@ def get_default_interface() -> str:
         except Exception:
             pass
         return "Wi-Fi"
+
+    elif system == "darwin":  # macOS
+        try:
+            # macOS'te route komutu interface'i de verir (interface: en0)
+            output = subprocess.check_output(["route", "-n", "get", "default"]).decode()
+            match = re.search(r'interface:\s+(\S+)', output)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return "en0"  # Fallback
     
-    # Linux
-    try:
-        output = subprocess.check_output(["ip", "route"]).decode()
-        for line in output.splitlines():
-            if line.startswith("default") and "dev" in line:
-                parts = line.split()
-                return parts[parts.index("dev") + 1]
-    except Exception:
-        pass
+    else: # Linux
+        try:
+            output = subprocess.check_output(["ip", "route"]).decode()
+            for line in output.splitlines():
+                if line.startswith("default") and "dev" in line:
+                    parts = line.split()
+                    return parts[parts.index("dev") + 1]
+        except Exception:
+            pass
     
-    # Fallback: aktif wireless interface bul
-    try:
-        output = subprocess.check_output(["ls", "/sys/class/net/"]).decode()
-        for iface in output.strip().split():
-            if iface.startswith("wl"):
-                try:
-                    state = subprocess.check_output(
-                        ["cat", f"/sys/class/net/{iface}/operstate"]
-                    ).decode().strip()
-                    if state == "up":
-                        return iface
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    
-    return "wlan0"
+    return "wlan0" # Fallback
 
 
 class ARPDefender:
@@ -130,14 +125,7 @@ class ARPDefender:
         except Exception:
             pass
         return "Wi-Fi"
-    
-    # === SAVUNMA 2: ARP Tablosu Düzeltme ===
-    
-    def restore_arp_table(self) -> bool:
-        """ARP tablosunu düzeltir (statik entry dinamik olanı ezer)."""
-        self.logger.info("[DEFENSE] ARP düzeltiliyor...")
-        return self.apply_static_arp()
-    
+        
     # === SAVUNMA 3: MAC Engelleme (Linux) ===
     
     def block_attacker_mac(self, attacker_mac: str) -> bool:
@@ -153,10 +141,8 @@ class ARPDefender:
         try:
             r1 = self._run(["sudo", "iptables", "-A", "INPUT", "-m", "mac",
                            "--mac-source", attacker_mac, "-j", "DROP"])
-            r2 = self._run(["sudo", "iptables", "-A", "FORWARD", "-m", "mac",
-                           "--mac-source", attacker_mac, "-j", "DROP"])
             
-            if r1.returncode == 0 and r2.returncode == 0:
+            if r1.returncode == 0:
                 self.blocked_macs.add(attacker_mac)
                 self.logger.info(f"[DEFENSE] ✓ {attacker_mac} engellendi!")
                 return True
@@ -193,44 +179,16 @@ class ARPDefender:
         except Exception:
             return False
     
-    # === SAVUNMA 5: Gratuitous ARP ===
-    
-    def send_gratuitous_arp(self) -> bool:
-        """Ağa Gratuitous ARP gönderir."""
-        try:
-            from scapy.all import Ether, ARP, sendp, get_if_hwaddr, get_if_addr
-            
-            my_mac = get_if_hwaddr(self.interface)
-            my_ip = get_if_addr(self.interface)
-            
-            pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(
-                op=1, hwsrc=my_mac, psrc=my_ip,
-                hwdst="ff:ff:ff:ff:ff:ff", pdst=my_ip
-            )
-            
-            sendp(pkt, iface=self.interface, verbose=False, count=3)
-            self.logger.info("[DEFENSE] ✓ Gratuitous ARP gönderildi.")
-            return True
-        except ImportError:
-            self.logger.warning("[DEFENSE] Scapy yüklü değil.")
-            return False
-        except Exception as e:
-            self.logger.error(f"[DEFENSE] GARP hatası: {e}")
-            return False
-    
     # === OTOMATİK SAVUNMA ===
     
     def auto_defend(self, detected_mac: str, severity: str = "medium"):
         """Şiddet seviyesine göre savunma uygular."""
         self.logger.warning(f"[DEFENSE] Otomatik savunma: {severity}")
         
-        self.restore_arp_table()
+        self.apply_static_arp()
         
         if severity in ["medium", "high", "critical"]:
             self.block_attacker_mac(detected_mac)
-        
-        if severity in ["high", "critical"]:
-            self.send_gratuitous_arp()
         
         if severity == "critical":
             self.disable_network()
