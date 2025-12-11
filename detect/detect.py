@@ -7,6 +7,8 @@ import logging
 import argparse
 import context
 from logger import DetectionLogger
+import ctypes  
+import os
 
 # Defense modülünü import et
 try:
@@ -23,6 +25,27 @@ defender = None
 defense_enabled = False
 defense_mode = "active"
 attack_count = 0
+
+def is_admin():
+    """Kullanıcının yönetici olup olmadığını kontrol eder."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def force_admin():
+    """Yönetici izni yoksa betiği yönetici olarak yeniden başlatır."""
+    if platform.system() == "Windows" and not is_admin():
+        print("[!] UYARI: Savunma modülü için Yönetici (Administrator) yetkisi gerekiyor.")
+        print("[*] Yönetici izni isteniyor, lütfen açılan pencereye 'Evet' deyin...")
+        try:
+            # Argümanları al ve yönetici olarak yeniden başlat
+            params = " ".join([f'"{arg}"' for arg in sys.argv])
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+            sys.exit()  # Mevcut (yetkisiz) işlemi kapat
+        except Exception as e:
+            print(f"[!] Yönetici izni alınamadı: {e}")
+            sys.exit(1)
 
 def get_gateway_ip():
     """
@@ -305,6 +328,9 @@ def cleanup():
 def main():
     setup_arg_parser()
     parse_args()
+
+    if defense_enabled:
+        force_admin()
     context.mitm_logger = DetectionLogger.setup_logger()
     try:
         monitor_gateway()
