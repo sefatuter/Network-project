@@ -26,72 +26,76 @@ attack_count = 0
 
 def get_gateway_ip():
     """
-    Return the system's default gateway IP as a string.
-    Supports Windows, Linux, and macOS.
+    Sistemin varsayılan ağ geçidini bulur.
+    Gereksiz boşlukları temizler (strip).
     """
     system = platform.system()
+    gateway = None
     
-    if system == "Windows":
-        cmd = ["route", "print", "0.0.0.0"]
-        try:
+    try:
+        if system == "Windows":
+            cmd = ["route", "print", "0.0.0.0"]
             output = subprocess.check_output(cmd).decode(errors="ignore")
             for line in output.splitlines():
                 if line.strip().startswith("0.0.0.0"):
                     parts = line.split()
                     if len(parts) > 2:
-                        context.gateway_ip = parts[2]
-                        return
-        except Exception:
-            pass
-
-    elif system == "Darwin":  # macOS
-        try:
-            # macOS için 'route -n get default' komutu kullanılır
+                        gateway = parts[2]
+                        break 
+                        
+        elif system == "Darwin":  # macOS
             cmd = ["route", "-n", "get", "default"]
             output = subprocess.check_output(cmd).decode()
-            # Çıktı örneği: "gateway: 192.168.1.1" satırını bul
             match = re.search(r'gateway:\s+(\S+)', output)
             if match:
-                context.gateway_ip = match.group(1)
-                return
-        except Exception:
-            pass
+                gateway = match.group(1)
 
-    else:  # Linux
-        try:
+        else:  # Linux
             cmd = ["ip", "route"]
             output = subprocess.check_output(cmd).decode()
             match = re.search(r"default via (\S+)", output)
             if match:
-                context.gateway_ip = match.group(1)
-                return
-        except Exception:
-            pass
-            
-    context.gateway_ip = None
+                gateway = match.group(1)
+
+    except Exception as e:
+        pass
+
+    if gateway:
+        context.gateway_ip = gateway.strip()
+    else:
+        context.gateway_ip = None
 
 def get_mac_from_arp():
     """
-    Returns MAC address of a specific IP from the OS ARP table.
-    Refactored to take IP as an argument explicitly.
+    İşletim sistemi ARP tablosundan Gateway MAC adresini çeker.
+    macOS sıfır kısaltması (0 vs 00) ve parantezli yapı için güncellendi.
     """
+    if not context.gateway_ip:
+        return None
+
     cmd = ["arp", "-a"]
     try:
         output = subprocess.check_output(cmd).decode(errors="ignore")
     except subprocess.CalledProcessError:
         return None
 
-    # Regex to find MAC address
-    # Supports: 00:11:22... and 00-11-22...
-    mac_regex = r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}"
+    # Regex: 1 veya 2 hane kabul eder (macOS uyumu)
+    mac_regex = r"([0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}"
 
     for line in output.splitlines():
-        # Check if the line contains our target IP
         if context.gateway_ip in line:
             mac_match = re.search(mac_regex, line)
+            
             if mac_match:
-                # Normalize MAC to standard format (e.g. replace - with :)
-                return mac_match.group(0).replace("-", ":").lower()
+                raw_mac = mac_match.group(0)
+                # Ayraçları standartlaştır
+                raw_mac = raw_mac.replace("-", ":").lower()
+                
+                # macOS'in kısalttığı (0) gibi yerleri (00) formatına tamamla
+                parts = raw_mac.split(":")
+                normalized_mac = ":".join([p.zfill(2) for p in parts])
+                
+                return normalized_mac
                 
     return None
 
@@ -107,7 +111,6 @@ def determine_severity(count):
 def print_status():
     """Başlangıç durum bilgisini yazdırır."""
     global defense_enabled, defense_mode
-    # Prefer using the configured logger; fall back to print() if missing.
 
     lines = []
     lines.append("\n" + "="*60)
@@ -151,7 +154,6 @@ def monitor_gateway():
     # 2. İlk (Orijinal) MAC adresini öğren
     initial_mac = get_mac_from_arp()
     
-    # Eğer ilk başta bulamazsa bir kez ping atıp tekrar denesin
     if not initial_mac:
         context.mitm_logger.info("[*] Gateway ARP tablosunda yok, ping atılıyor...")
         param = "-n" if platform.system().lower() == "windows" else "-c"
@@ -179,11 +181,9 @@ def monitor_gateway():
         if defense_mode == "aggressive":
             defender.apply_static_arp()
 
-    # last_mac'i başlangıç değerine eşitle
     last_mac = context.original_mac
     attack_count = 0
 
-    # Durum bilgisini yazdır
     print_status()
     
     context.mitm_logger.info(f"[*] İzleme Başladı...")
@@ -193,7 +193,6 @@ def monitor_gateway():
             time.sleep(context.interval)
             
             # --- AKTİF KONTROL (PING) ---
-            # ARP tablosunu taze tutmak için
             param = "-n" if platform.system().lower() == "windows" else "-c"
             subprocess.call(["ping", param, "1", context.gateway_ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
@@ -201,7 +200,6 @@ def monitor_gateway():
             current_mac = get_mac_from_arp()
 
             if not current_mac:
-                # MAC okunamazsa (ping başarısız vs) atla
                 continue
 
             # =====================================================================
@@ -219,26 +217,22 @@ def monitor_gateway():
                 context.mitm_logger.critical("!!!" + "="*50 + "!!!")
                 
                 # =====================================================
-                # SAVUNMA UYGULA (eğer aktifse)
+                # SAVUNMA UYGULA
                 # =====================================================
                 if defense_enabled and defender:
                     context.mitm_logger.info("[DEFENSE] 🛡️ Savunma mekanizması devreye giriyor...")
                     
                     if defense_mode == "passive":
-                        # Pasif mod: Sadece uyar
                         context.mitm_logger.info("[DEFENSE] Pasif mod - Sadece uyarı verildi.")
                         
                     elif defense_mode == "active":
-                        # Aktif mod: ARP tablosunu düzelt
                         context.mitm_logger.info("[DEFENSE] Aktif mod - ARP tablosu düzeltiliyor...")
                         defender.apply_static_arp()
                         
                     elif defense_mode == "aggressive":
-                        # Agresif mod: Tam savunma
                         context.mitm_logger.info("[DEFENSE] Agresif mod - Tam savunma uygulanıyor...")
                         defender.auto_defend(current_mac, severity)
                 
-                # Saldırı yeni başladıysa bildir
                 if last_mac == context.original_mac:
                     context.mitm_logger.warning("[!] Yeni saldırı başladı!")
             
@@ -250,7 +244,7 @@ def monitor_gateway():
                 context.mitm_logger.info("[+] ✓ ARP Spoofing sona erdi. MAC normale döndü.")
                 context.mitm_logger.info(f"[+] Toplam ardışık saldırı tespiti: {attack_count}")
                 context.mitm_logger.info("="*50)
-                attack_count = 0  # Sayacı sıfırla
+                attack_count = 0 
 
             last_mac = current_mac
 
@@ -263,35 +257,22 @@ def setup_arg_parser():
     global parser
     parser = argparse.ArgumentParser(
         description="ARP Spoofing Tespit ve Savunma Sistemi",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Örnekler:
-  sudo python3 detect.py -c                         # Sadece tespit
-  sudo python3 detect.py -c -d                      # Tespit + Savunma (active mod)
-  sudo python3 detect.py -c -d --defense-mode aggressive  # Agresif savunma
-  sudo python3 detect.py -c -f -d                   # Konsol + Dosya + Savunma
-  sudo python3 detect.py -c -i 3                    # 3 saniye aralıkla izle
-        """
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    # İzleme aralığı
-    parser.add_argument("-i", "--interval", type=int, default=5, help="Interval in seconds (default: 5)")
+    # İzleme aralığı (Float destekler)
+    parser.add_argument("-i", "--interval", type=float, default=5, help="Interval in seconds (default: 5)")
     
-    # Konsol çıktısı
     parser.add_argument('-c','--console', dest='console', action='store_true', help='Enable console output')
     parser.add_argument('-noc','--no-console', dest='console', action='store_false', help='Disable console output')
     parser.set_defaults(console=True)
     
-    # Dosya çıktısı
     parser.add_argument('-f','--file', dest='file', action='store_true', help='Enable file output')
     parser.add_argument('-nof','--no-file', dest='file', action='store_false', help='Disable file output')
     parser.set_defaults(file=False)
     
-    # Savunma argümanları
-    parser.add_argument('-d', '--defense', dest='defense', action='store_true', 
-                        help='Enable defense module (requires defense.py)')
-    parser.add_argument('-nod', '--no-defense', dest='defense', action='store_false', 
-                        help='Disable defense module')
+    parser.add_argument('-d', '--defense', dest='defense', action='store_true', help='Enable defense module')
+    parser.add_argument('-nod', '--no-defense', dest='defense', action='store_false', help='Disable defense module')
     parser.set_defaults(defense=False)
     
     parser.add_argument('--defense-mode', type=str, choices=['passive', 'active', 'aggressive'],
@@ -299,7 +280,6 @@ def setup_arg_parser():
 
 def parse_args():
     global defense_enabled, defense_mode
-    
     args = parser.parse_args()
     context.interval = args.interval
     context.active_handlers = []
@@ -309,18 +289,14 @@ def parse_args():
     if args.file:
         context.active_handlers.append("file")
     
-    # Defense ayarları
     defense_enabled = args.defense
     defense_mode = args.defense_mode
     
-    # Defense modülü yoksa uyar
     if defense_enabled and not DEFENSE_AVAILABLE:
         print("[!] UYARI: defense.py bulunamadı! Savunma devre dışı bırakıldı.")
-        print("[!] defense.py dosyasını detect.py ile aynı dizine koyun.")
         defense_enabled = False
 
 def cleanup():
-    """Program kapanırken temizlik yapar."""
     global defender
     if defender:
         context.mitm_logger.info("\n[*] Program kapatılıyor...")
@@ -330,7 +306,6 @@ def main():
     setup_arg_parser()
     parse_args()
     context.mitm_logger = DetectionLogger.setup_logger()
-    
     try:
         monitor_gateway()
     finally:
@@ -340,5 +315,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[!] CTRL+C tespit edildi. Çıkılıyor...")
         sys.exit(0)
