@@ -1,62 +1,14 @@
 #!/usr/bin/env python3
 """
 ARP Spoofing Defense Module - detect.py ile kullanım için.
+Düzeltmeler: MAC Normalizasyonu (0 -> 00) ve macOS uyumluluğu.
 """
 
 import subprocess
 import platform
 import re
-from typing import Optional
 import logging
-
-
-def get_default_interface() -> str:
-    """Varsayılan ağ arayüzünü tespit eder (Windows, Linux, macOS)."""
-    system = platform.system().lower()
-    
-    if system == "windows":
-        try:
-            output = subprocess.check_output(
-                ["netsh", "interface", "show", "interface"],
-                text=True, errors="ignore"
-            )
-            for line in output.splitlines():
-                if "Connected" in line or "Bağlı" in line:
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        name = parts[-1]
-                        if "wi-fi" in name.lower() or "wireless" in name.lower():
-                            return name
-            for line in output.splitlines():
-                if "Connected" in line or "Bağlı" in line:
-                    return line.split()[-1]
-        except Exception:
-            pass
-        return "Wi-Fi"
-
-    elif system == "darwin":  # macOS
-        try:
-            # macOS'te route komutu interface'i de verir (interface: en0)
-            output = subprocess.check_output(["route", "-n", "get", "default"]).decode()
-            match = re.search(r'interface:\s+(\S+)', output)
-            if match:
-                return match.group(1)
-        except Exception:
-            pass
-        return "en0"  # Fallback
-    
-    else: # Linux
-        try:
-            output = subprocess.check_output(["ip", "route"]).decode()
-            for line in output.splitlines():
-                if line.startswith("default") and "dev" in line:
-                    parts = line.split()
-                    return parts[parts.index("dev") + 1]
-        except Exception:
-            pass
-    
-    return "wlan0" # Fallback
-
+import shutil
 
 class ARPDefender:
     """ARP Spoofing savunma mekanizmaları."""
@@ -64,79 +16,129 @@ class ARPDefender:
     def __init__(self, gateway_ip: str, original_mac: str, 
                  logger: logging.Logger, interface: str = None):
         self.gateway_ip = gateway_ip
-        self.original_mac = original_mac
+        # Gelen MAC adresini anında fixle (örn: 0 -> 00)
+        self.original_mac = self._normalize_mac(original_mac)
         self.logger = logger
-        self.interface = interface or get_default_interface()
         self.system = platform.system().lower()
+        self.interface = interface or self._get_default_interface()
         self.blocked_macs = set()
-    
+        
+        # arp komutunun tam yolunu bul (macOS için önemli)
+        self.arp_cmd = shutil.which("arp") or "/usr/sbin/arp"
+
+    def _normalize_mac(self, mac: str) -> str:
+        """
+        MAC adresini işletim sisteminin seveceği 00:11:22... formatına çevirir.
+        Özellikle macOS'in '0' çıktılarını '00' yapar.
+        """
+        if not mac: return ""
+        try:
+            # Temizle
+            clean_mac = mac.strip().replace("-", ":").lower()
+            parts = clean_mac.split(":")
+            
+            # Eğer 6 parça varsa (geçerli bir MAC ise)
+            if len(parts) == 6:
+                # Her parçayı 2 haneye tamamla (zfill)
+                return ":".join([p.zfill(2) for p in parts])
+            return clean_mac
+        except Exception:
+            return mac
+
     def _run(self, cmd: list) -> subprocess.CompletedProcess:
-        """Subprocess wrapper."""
+        """Komut çalıştırma yardımcısı."""
+        # None olan argümanları temizle ve string'e çevir
+        cmd = [str(c) for c in cmd if c is not None]
         return subprocess.run(cmd, capture_output=True, text=True)
     
-    # === SAVUNMA 1: Statik ARP ===
+    def _get_default_interface(self) -> str:
+        """İşletim sistemine göre aktif ağ arayüzünü bulur."""
+        if self.system == "windows":
+            return "Wi-Fi"
+        elif self.system == "darwin":  # macOS
+            try:
+                # macOS route tablosundan interface'i çeker
+                out = subprocess.check_output(["route", "-n", "get", "default"], stderr=subprocess.DEVNULL).decode()
+                m = re.search(r'interface:\s+(\S+)', out)
+                return m.group(1) if m else "en0"
+            except:
+                return "en0"
+        else: # Linux
+            try:
+                out = subprocess.check_output(["ip", "route"], stderr=subprocess.DEVNULL).decode()
+                m = re.search(r'default via .+ dev (\S+)', out)
+                return m.group(1) if m else "eth0"
+            except:
+                return "eth0"
+
+    # === SAVUNMA 1: Statik ARP (En Önemli Kısım) ===
     
     def apply_static_arp(self) -> bool:
-        """Gateway için statik ARP girişi ekler."""
-        self.logger.info(f"[DEFENSE] Statik ARP: {self.gateway_ip} -> {self.original_mac}")
+        """
+        Gateway MAC adresini statik olarak sabitler.
+        Bu işlem Spoofing saldırısını etkisiz hale getirir.
+        """
+        self.logger.info(f"[DEFENSE] Statik ARP Uygulanıyor: {self.gateway_ip} -> {self.original_mac}")
         
         try:
             if self.system == "windows":
                 self._run(["netsh", "interface", "ip", "delete", "neighbors",
                           "interface=*", f"address={self.gateway_ip}"])
-                iface = self._get_win_interface()
+                
                 result = self._run(["netsh", "interface", "ip", "add", "neighbors",
-                                   f"interface={iface}", f"address={self.gateway_ip}",
+                                   f"interface={self.interface}", f"address={self.gateway_ip}",
                                    f"neighbor={self.original_mac.replace(':', '-')}"])
             else:
-                self._run(["sudo", "arp", "-d", self.gateway_ip])
-                result = self._run(["sudo", "arp", "-s", self.gateway_ip, self.original_mac])
+                # macOS ve Linux
+                # 1. Mevcut (zehirli) kaydı sil
+                self._run(["sudo", self.arp_cmd, "-d", self.gateway_ip])
+                
+                # 2. Doğru MAC adresini 'permanent' (kalıcı) olarak ekle
+                result = self._run(["sudo", self.arp_cmd, "-s", self.gateway_ip, self.original_mac])
             
             if result.returncode == 0:
-                self.logger.info("[DEFENSE] ✓ Statik ARP eklendi!")
+                self.logger.info("[DEFENSE] ✓ Statik ARP başarıyla eklendi! (Saldırı Engellendi)")
                 return True
-            self.logger.error(f"[DEFENSE] ✗ Statik ARP başarısız: {result.stderr}")
-            return False
+            else:
+                self.logger.error(f"[DEFENSE] ✗ Statik ARP hatası: {result.stderr.strip()}")
+                return False
+
         except Exception as e:
-            self.logger.error(f"[DEFENSE] Hata: {e}")
+            self.logger.error(f"[DEFENSE] Kritik Hata: {e}")
             return False
     
     def remove_static_arp(self) -> bool:
-        """Statik ARP girişini kaldırır."""
+        """Program kapanırken statik ARP kaydını siler."""
         try:
             if self.system == "windows":
                 self._run(["netsh", "interface", "ip", "delete", "neighbors",
                           "interface=*", f"address={self.gateway_ip}"])
             else:
-                self._run(["sudo", "arp", "-d", self.gateway_ip])
-            self.logger.info("[DEFENSE] Statik ARP kaldırıldı.")
+                # macOS/Linux: sudo arp -d IP
+                self._run(["sudo", self.arp_cmd, "-d", self.gateway_ip])
+            self.logger.info("[DEFENSE] Statik ARP temizlendi, normale dönüldü.")
             return True
         except Exception:
             return False
-    
-    def _get_win_interface(self) -> str:
-        """Windows interface adı."""
-        try:
-            output = subprocess.check_output(
-                ["netsh", "interface", "show", "interface"], text=True)
-            for line in output.splitlines():
-                if "Connected" in line:
-                    return line.split()[-1]
-        except Exception:
-            pass
-        return "Wi-Fi"
-        
-    # === SAVUNMA 3: MAC Engelleme (Linux) ===
+
+    # === SAVUNMA 3: MAC Engelleme (Linux Only) ===
     
     def block_attacker_mac(self, attacker_mac: str) -> bool:
-        """Saldırgan MAC'ini iptables ile engeller."""
-        if self.system == "windows":
-            return False
+        """
+        Saldırganı engeller.
+        macOS'te iptables olmadığı için sadece uyarı verir.
+        """
+        if self.system != "linux":
+            if attacker_mac not in self.blocked_macs:
+                 self.logger.info(f"[DEFENSE] Not: macOS üzerinde MAC engelleme (firewall) pasif.")
+                 self.logger.info(f"[DEFENSE] Merak etmeyin, Statik ARP saldırıyı zaten durdurdu! 🛡️")
+                 self.blocked_macs.add(attacker_mac)
+            return True 
         
         if attacker_mac in self.blocked_macs:
             return True
         
-        self.logger.info(f"[DEFENSE] Engelleniyor: {attacker_mac}")
+        self.logger.info(f"[DEFENSE] Firewall ile engelleniyor: {attacker_mac}")
         
         try:
             r1 = self._run(["sudo", "iptables", "-A", "INPUT", "-m", "mac",
@@ -144,58 +146,64 @@ class ARPDefender:
             
             if r1.returncode == 0:
                 self.blocked_macs.add(attacker_mac)
-                self.logger.info(f"[DEFENSE] ✓ {attacker_mac} engellendi!")
+                self.logger.info(f"[DEFENSE] ✓ {attacker_mac} iptables ile engellendi!")
                 return True
             return False
         except Exception:
             return False
     
     def _unblock_mac(self, mac: str):
-        """MAC engelini kaldır."""
-        if self.system == "windows" or mac not in self.blocked_macs:
-            return
-        try:
-            self._run(["sudo", "iptables", "-D", "INPUT", "-m", "mac",
-                      "--mac-source", mac, "-j", "DROP"])
-            self._run(["sudo", "iptables", "-D", "FORWARD", "-m", "mac",
-                      "--mac-source", mac, "-j", "DROP"])
-            self.blocked_macs.discard(mac)
-        except Exception:
-            pass
+        """Varsa engeli kaldırır."""
+        if self.system == "linux" and mac in self.blocked_macs:
+            try:
+                self._run(["sudo", "iptables", "-D", "INPUT", "-m", "mac",
+                          "--mac-source", mac, "-j", "DROP"])
+            except: pass
+        self.blocked_macs.discard(mac)
     
-    # === SAVUNMA 4: Ağ Kesme (Son Çare) ===
+    # === SAVUNMA 4: Ağ Kesme (Acil Durum Butonu) ===
     
     def disable_network(self) -> bool:
-        """Ağ arayüzünü kapatır."""
-        self.logger.critical("[DEFENSE] ⚠️ AĞ KAPATILIYOR!")
+        """Çok yüksek tehdit durumunda interneti komple keser."""
+        self.logger.critical("[DEFENSE] ⚠️ KRİTİK SEVİYE: AĞ BAĞLANTISI KESİLİYOR!")
         
         try:
             if self.system == "windows":
                 result = self._run(["netsh", "interface", "set", "interface",
-                                   self._get_win_interface(), "disable"])
-            else:
+                                   self.interface, "disable"])
+            elif self.system == "darwin": # macOS
+                # macOS: sudo ifconfig en0 down
+                result = self._run(["sudo", "ifconfig", self.interface, "down"])
+            else: # Linux
                 result = self._run(["sudo", "ip", "link", "set", self.interface, "down"])
-            return result.returncode == 0
+            
+            if result.returncode == 0:
+                self.logger.critical("[DEFENSE] ✓ Ağ arayüzü kapatıldı.")
+                return True
+            return False
         except Exception:
             return False
     
-    # === OTOMATİK SAVUNMA ===
-    
     def auto_defend(self, detected_mac: str, severity: str = "medium"):
         """Şiddet seviyesine göre savunma uygular."""
-        self.logger.warning(f"[DEFENSE] Otomatik savunma: {severity}")
+        norm_attacker_mac = self._normalize_mac(detected_mac)
         
+        self.logger.warning(f"[DEFENSE] Otomatik savunma başlatıldı (Seviye: {severity})")
+        
+        # 1. ADIM: ARP Tablosunu Kilitle (En Önemlisi)
         self.apply_static_arp()
         
+        # 2. ADIM: Saldırganı Blokla (Sadece Linux'ta aktiftir)
         if severity in ["medium", "high", "critical"]:
-            self.block_attacker_mac(detected_mac)
+            self.block_attacker_mac(norm_attacker_mac)
         
+        # 3. ADIM: Kritik seviyede fişi çek
         if severity == "critical":
             self.disable_network()
     
     def cleanup(self):
-        """Temizlik."""
-        self.logger.info("[DEFENSE] Temizlik...")
+        """Program kapanırken her şeyi temizle."""
+        self.logger.info("[DEFENSE] Temizlik yapılıyor...")
         for mac in list(self.blocked_macs):
             self._unblock_mac(mac)
         self.remove_static_arp()
