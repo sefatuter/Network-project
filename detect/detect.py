@@ -284,7 +284,7 @@ def setup_arg_parser():
     )
     
     # İzleme aralığı (Float destekler)
-    parser.add_argument("-i", "--interval", type=float, default=5, help="Interval in seconds (default: 5)")
+    parser.add_argument("-i", "--interval", type=float, default=0.01, help="Interval in seconds (default: 5)")
     
     parser.add_argument('-c','--console', dest='console', action='store_true', help='Enable console output')
     parser.add_argument('-noc','--no-console', dest='console', action='store_false', help='Disable console output')
