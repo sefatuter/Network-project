@@ -136,7 +136,7 @@ def print_status():
     global defense_enabled, defense_mode
 
     lines = []
-    lines.append("\n" + "="*60)
+    lines.append("="*60)
     lines.append("🛡️  ARP SPOOFING TESPİT VE SAVUNMA SİSTEMİ")
     lines.append("="*60)
     lines.append(f"  Gateway IP      : {context.gateway_ip}")

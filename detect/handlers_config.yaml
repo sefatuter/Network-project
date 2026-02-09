@@ -10,3 +10,4 @@ file:
   level: INFO
   filename: "events_{timestamp}.log"
   mode: "w"
+  encoding: "utf-8"
